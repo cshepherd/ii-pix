@@ -12,7 +12,7 @@ cimport common
 
 def dither_shr_perfect(
         float[:, :, ::1] input_rgb, float[:, ::1] full_palette_cam, float[:, ::1] full_palette_rgb,
-        float[:,::1] rgb_to_cam16ucs):
+        float[:,::1] rgb_to_cam16ucs, str dither='floyd-steinberg'):
     cdef int y, x, idx, best_colour_idx, i, j
     cdef double best_distance, distance, total_image_error
     cdef float[::1] best_colour_rgb
@@ -25,7 +25,8 @@ def dither_shr_perfect(
     cdef int palette_size = full_palette_rgb.shape[0]
 
     cdef float decay = 0.5
-    cdef int floyd_steinberg = 1
+    cdef int floyd_steinberg = 1 if dither == 'floyd-steinberg' else 0
+    cdef int no_dither = 1 if dither == 'none' else 0
 
     cdef common.float3 cam, pixel_cam
 
@@ -57,78 +58,79 @@ def dither_shr_perfect(
                 quant_error = working_image[y, x, i] - best_colour_rgb[i]
 
                 working_image[y, x, i] = best_colour_rgb[i]
-                if floyd_steinberg:
-                    # Floyd-Steinberg dither
-                    # 0 * 7
-                    # 3 5 1
-                    if x < 319:
-                        working_image[y, x + 1, i] = common.clip(
-                            working_image[y, x + 1, i] + quant_error * (7 / 16), 0, 1)
-                    if y < 199:
-                        if x > 0:
-                            working_image[y + 1, x - 1, i] = common.clip(
-                                working_image[y + 1, x - 1, i] + decay * quant_error * (3 / 16), 0, 1)
-                        working_image[y + 1, x, i] = common.clip(
-                            working_image[y + 1, x, i] + decay * quant_error * (5 / 16), 0, 1)
+                if not no_dither:
+                    if floyd_steinberg:
+                        # Floyd-Steinberg dither
+                        # 0 * 7
+                        # 3 5 1
                         if x < 319:
-                            working_image[y + 1, x + 1, i] = common.clip(
-                                working_image[y + 1, x + 1, i] + decay * quant_error * (1 / 16), 0, 1)
-                else:
-                    # Jarvis
-                    # 0 0 X 7 5
-                    # 3 5 7 5 3
-                    # 1 3 5 3 1
-                    if x < 319:
-                        working_image[y, x + 1, i] = common.clip(
-                            working_image[y, x + 1, i] + quant_error * (7 / 48), 0, 1)
-                    if x < 318:
-                        working_image[y, x + 2, i] = common.clip(
-                            working_image[y, x + 2, i] + quant_error * (5 / 48), 0, 1)
-                    if y < 199:
-                        if x > 1:
-                            working_image[y + 1, x - 2, i] = common.clip(
-                                working_image[y + 1, x - 2, i] + decay * quant_error * (3 / 48), 0,
-                                1)
-                        if x > 0:
-                            working_image[y + 1, x - 1, i] = common.clip(
-                                working_image[y + 1, x - 1, i] + decay * quant_error * (5 / 48), 0,
-                                1)
-                        working_image[y + 1, x, i] = common.clip(
-                            working_image[y + 1, x, i] + decay * quant_error * (7 / 48), 0, 1)
+                            working_image[y, x + 1, i] = common.clip(
+                                working_image[y, x + 1, i] + quant_error * (7 / 16), 0, 1)
+                        if y < 199:
+                            if x > 0:
+                                working_image[y + 1, x - 1, i] = common.clip(
+                                    working_image[y + 1, x - 1, i] + decay * quant_error * (3 / 16), 0, 1)
+                            working_image[y + 1, x, i] = common.clip(
+                                working_image[y + 1, x, i] + decay * quant_error * (5 / 16), 0, 1)
+                            if x < 319:
+                                working_image[y + 1, x + 1, i] = common.clip(
+                                    working_image[y + 1, x + 1, i] + decay * quant_error * (1 / 16), 0, 1)
+                    else:
+                        # Jarvis
+                        # 0 0 X 7 5
+                        # 3 5 7 5 3
+                        # 1 3 5 3 1
                         if x < 319:
-                            working_image[y + 1, x + 1, i] = common.clip(
-                                working_image[y + 1, x + 1, i] + decay * quant_error * (5 / 48),
-                                0, 1)
+                            working_image[y, x + 1, i] = common.clip(
+                                working_image[y, x + 1, i] + quant_error * (7 / 48), 0, 1)
                         if x < 318:
-                            working_image[y + 1, x + 2, i] = common.clip(
-                                working_image[y + 1, x + 2, i] + decay * quant_error * (3 / 48),
-                                0, 1)
-                    if y < 198:
-                        if x > 1:
-                            working_image[y + 2, x - 2, i] = common.clip(
-                                working_image[y + 2, x - 2, i] + decay * decay * quant_error * (1 / 48), 0,
-                                1)
-                        if x > 0:
-                            working_image[y + 2, x - 1, i] = common.clip(
-                                working_image[y + 2, x - 1, i] + decay * decay * quant_error * (3 / 48), 0,
-                                1)
-                        working_image[y + 2, x, i] = common.clip(
-                            working_image[y + 2, x, i] + decay * decay * quant_error * (5 / 48), 0, 1)
-                        if x < 319:
-                            working_image[y + 2, x + 1, i] = common.clip(
-                                working_image[y + 2, x + 1, i] + decay * decay * quant_error * (3 / 48),
-                                0, 1)
-                        if x < 318:
-                            working_image[y + 2, x + 2, i] = common.clip(
-                                working_image[y + 2, x + 2, i] + decay * decay * quant_error * (1 / 48),
-                                0, 1)
+                            working_image[y, x + 2, i] = common.clip(
+                                working_image[y, x + 2, i] + quant_error * (5 / 48), 0, 1)
+                        if y < 199:
+                            if x > 1:
+                                working_image[y + 1, x - 2, i] = common.clip(
+                                    working_image[y + 1, x - 2, i] + decay * quant_error * (3 / 48), 0,
+                                    1)
+                            if x > 0:
+                                working_image[y + 1, x - 1, i] = common.clip(
+                                    working_image[y + 1, x - 1, i] + decay * quant_error * (5 / 48), 0,
+                                    1)
+                            working_image[y + 1, x, i] = common.clip(
+                                working_image[y + 1, x, i] + decay * quant_error * (7 / 48), 0, 1)
+                            if x < 319:
+                                working_image[y + 1, x + 1, i] = common.clip(
+                                    working_image[y + 1, x + 1, i] + decay * quant_error * (5 / 48),
+                                    0, 1)
+                            if x < 318:
+                                working_image[y + 1, x + 2, i] = common.clip(
+                                    working_image[y + 1, x + 2, i] + decay * quant_error * (3 / 48),
+                                    0, 1)
+                        if y < 198:
+                            if x > 1:
+                                working_image[y + 2, x - 2, i] = common.clip(
+                                    working_image[y + 2, x - 2, i] + decay * decay * quant_error * (1 / 48), 0,
+                                    1)
+                            if x > 0:
+                                working_image[y + 2, x - 1, i] = common.clip(
+                                    working_image[y + 2, x - 1, i] + decay * decay * quant_error * (3 / 48), 0,
+                                    1)
+                            working_image[y + 2, x, i] = common.clip(
+                                working_image[y + 2, x, i] + decay * decay * quant_error * (5 / 48), 0, 1)
+                            if x < 319:
+                                working_image[y + 2, x + 1, i] = common.clip(
+                                    working_image[y + 2, x + 1, i] + decay * decay * quant_error * (3 / 48),
+                                    0, 1)
+                            if x < 318:
+                                working_image[y + 2, x + 2, i] = common.clip(
+                                    working_image[y + 2, x + 2, i] + decay * decay * quant_error * (1 / 48),
+                                    0, 1)
 
     return total_image_error, working_image
 
 
 def dither_shr(
         float[:, :, ::1] input_rgb, float[:, :, ::1] palettes_cam, float[:, :, ::1] palettes_rgb,
-        float[:,::1] rgb_to_cam16ucs):
+        float[:,::1] rgb_to_cam16ucs, int colours_per_palette=16, str dither='floyd-steinberg'):
     cdef int y, x, idx, best_colour_idx, best_palette, i, j
     cdef double best_distance, distance, total_image_error
     cdef float[::1] best_colour_rgb
@@ -144,7 +146,8 @@ def dither_shr(
     cdef PaletteSelection palette_line
 
     cdef float decay = 0.5
-    cdef int floyd_steinberg = 1
+    cdef int floyd_steinberg = 1 if dither == 'floyd-steinberg' else 0
+    cdef int no_dither = 1 if dither == 'none' else 0
 
     cdef common.float3 pixel_cam, cam
 
@@ -157,7 +160,7 @@ def dither_shr(
             for j in range(3):
                 line_cam[x, j] = pixel_cam.data[j]
 
-        palette_line = best_palette_for_line(line_cam, palettes_cam, best_palette)
+        palette_line = best_palette_for_line(line_cam, palettes_cam, best_palette, colours_per_palette)
         best_palette = palette_line.palette_idx
         palette_line_errors[y] = palette_line.total_error
 
@@ -171,7 +174,7 @@ def dither_shr(
 
             best_distance = 1e9
             best_colour_idx = -1
-            for idx in range(16):
+            for idx in range(colours_per_palette):
                 for j in range(3):
                     cam.data[j] = palette_cam[idx, j]
                 distance = common.colour_distance_squared(pixel_cam.data, cam.data)
@@ -186,71 +189,72 @@ def dither_shr(
                 quant_error = working_image[y, x, i] - best_colour_rgb[i]
 
                 working_image[y, x, i] = best_colour_rgb[i]
-                if floyd_steinberg:
-                    # Floyd-Steinberg dither
-                    # 0 * 7
-                    # 3 5 1
-                    if x < 319:
-                        working_image[y, x + 1, i] = common.clip(
-                            working_image[y, x + 1, i] + quant_error * (7 / 16), 0, 1)
-                    if y < 199:
-                        if x > 0:
-                            working_image[y + 1, x - 1, i] = common.clip(
-                                working_image[y + 1, x - 1, i] + decay * quant_error * (3 / 16), 0, 1)
-                        working_image[y + 1, x, i] = common.clip(
-                            working_image[y + 1, x, i] + decay * quant_error * (5 / 16), 0, 1)
+                if not no_dither:
+                    if floyd_steinberg:
+                        # Floyd-Steinberg dither
+                        # 0 * 7
+                        # 3 5 1
                         if x < 319:
-                            working_image[y + 1, x + 1, i] = common.clip(
-                                working_image[y + 1, x + 1, i] + decay * quant_error * (1 / 16), 0, 1)
-                else:
-                    # Jarvis
-                    # 0 0 X 7 5
-                    # 3 5 7 5 3
-                    # 1 3 5 3 1
-                    if x < 319:
-                        working_image[y, x + 1, i] = common.clip(
-                            working_image[y, x + 1, i] + quant_error * (7 / 48), 0, 1)
-                    if x < 318:
-                        working_image[y, x + 2, i] = common.clip(
-                            working_image[y, x + 2, i] + quant_error * (5 / 48), 0, 1)
-                    if y < 199:
-                        if x > 1:
-                            working_image[y + 1, x - 2, i] = common.clip(
-                                working_image[y + 1, x - 2, i] + decay * quant_error * (3 / 48), 0,
-                                1)
-                        if x > 0:
-                            working_image[y + 1, x - 1, i] = common.clip(
-                                working_image[y + 1, x - 1, i] + decay * quant_error * (5 / 48), 0,
-                                1)
-                        working_image[y + 1, x, i] = common.clip(
-                            working_image[y + 1, x, i] + decay * quant_error * (7 / 48), 0, 1)
+                            working_image[y, x + 1, i] = common.clip(
+                                working_image[y, x + 1, i] + quant_error * (7 / 16), 0, 1)
+                        if y < 199:
+                            if x > 0:
+                                working_image[y + 1, x - 1, i] = common.clip(
+                                    working_image[y + 1, x - 1, i] + decay * quant_error * (3 / 16), 0, 1)
+                            working_image[y + 1, x, i] = common.clip(
+                                working_image[y + 1, x, i] + decay * quant_error * (5 / 16), 0, 1)
+                            if x < 319:
+                                working_image[y + 1, x + 1, i] = common.clip(
+                                    working_image[y + 1, x + 1, i] + decay * quant_error * (1 / 16), 0, 1)
+                    else:
+                        # Jarvis
+                        # 0 0 X 7 5
+                        # 3 5 7 5 3
+                        # 1 3 5 3 1
                         if x < 319:
-                            working_image[y + 1, x + 1, i] = common.clip(
-                                working_image[y + 1, x + 1, i] + decay * quant_error * (5 / 48),
-                                0, 1)
+                            working_image[y, x + 1, i] = common.clip(
+                                working_image[y, x + 1, i] + quant_error * (7 / 48), 0, 1)
                         if x < 318:
-                            working_image[y + 1, x + 2, i] = common.clip(
-                                working_image[y + 1, x + 2, i] + decay * quant_error * (3 / 48),
-                                0, 1)
-                    if y < 198:
-                        if x > 1:
-                            working_image[y + 2, x - 2, i] = common.clip(
-                                working_image[y + 2, x - 2, i] + decay * decay * quant_error * (1 / 48), 0,
-                                1)
-                        if x > 0:
-                            working_image[y + 2, x - 1, i] = common.clip(
-                                working_image[y + 2, x - 1, i] + decay * decay * quant_error * (3 / 48), 0,
-                                1)
-                        working_image[y + 2, x, i] = common.clip(
-                            working_image[y + 2, x, i] + decay * decay * quant_error * (5 / 48), 0, 1)
-                        if x < 319:
-                            working_image[y + 2, x + 1, i] = common.clip(
-                                working_image[y + 2, x + 1, i] + decay * decay * quant_error * (3 / 48),
-                                0, 1)
-                        if x < 318:
-                            working_image[y + 2, x + 2, i] = common.clip(
-                                working_image[y + 2, x + 2, i] + decay * decay * quant_error * (1 / 48),
-                                0, 1)
+                            working_image[y, x + 2, i] = common.clip(
+                                working_image[y, x + 2, i] + quant_error * (5 / 48), 0, 1)
+                        if y < 199:
+                            if x > 1:
+                                working_image[y + 1, x - 2, i] = common.clip(
+                                    working_image[y + 1, x - 2, i] + decay * quant_error * (3 / 48), 0,
+                                    1)
+                            if x > 0:
+                                working_image[y + 1, x - 1, i] = common.clip(
+                                    working_image[y + 1, x - 1, i] + decay * quant_error * (5 / 48), 0,
+                                    1)
+                            working_image[y + 1, x, i] = common.clip(
+                                working_image[y + 1, x, i] + decay * quant_error * (7 / 48), 0, 1)
+                            if x < 319:
+                                working_image[y + 1, x + 1, i] = common.clip(
+                                    working_image[y + 1, x + 1, i] + decay * quant_error * (5 / 48),
+                                    0, 1)
+                            if x < 318:
+                                working_image[y + 1, x + 2, i] = common.clip(
+                                    working_image[y + 1, x + 2, i] + decay * quant_error * (3 / 48),
+                                    0, 1)
+                        if y < 198:
+                            if x > 1:
+                                working_image[y + 2, x - 2, i] = common.clip(
+                                    working_image[y + 2, x - 2, i] + decay * decay * quant_error * (1 / 48), 0,
+                                    1)
+                            if x > 0:
+                                working_image[y + 2, x - 1, i] = common.clip(
+                                    working_image[y + 2, x - 1, i] + decay * decay * quant_error * (3 / 48), 0,
+                                    1)
+                            working_image[y + 2, x, i] = common.clip(
+                                working_image[y + 2, x, i] + decay * decay * quant_error * (5 / 48), 0, 1)
+                            if x < 319:
+                                working_image[y + 2, x + 1, i] = common.clip(
+                                    working_image[y + 2, x + 1, i] + decay * decay * quant_error * (3 / 48),
+                                    0, 1)
+                            if x < 318:
+                                working_image[y + 2, x + 2, i] = common.clip(
+                                    working_image[y + 2, x + 2, i] + decay * decay * quant_error * (1 / 48),
+                                    0, 1)
 
     return (
         np.array(output_4bit, dtype=np.uint8), line_to_palette, total_image_error,
@@ -264,7 +268,7 @@ cdef struct PaletteSelection:
 
 
 cdef PaletteSelection best_palette_for_line(
-    float [:, ::1] line_cam, float[:, :, ::1] palettes_cam, int last_palette_idx) nogil:
+    float [:, ::1] line_cam, float[:, :, ::1] palettes_cam, int last_palette_idx, int colours_per_palette) nogil:
     cdef int palette_idx, best_palette_idx, palette_entry_idx, pixel_idx
     cdef double best_total_dist, total_dist, best_pixel_dist, pixel_dist
     cdef float[:, ::1] palette_cam
@@ -281,7 +285,7 @@ cdef PaletteSelection best_palette_for_line(
             for j in range(3):
                 pixel_cam.data[j] = line_cam[pixel_idx, j]
             best_pixel_dist = 1e9
-            for palette_entry_idx in range(16):
+            for palette_entry_idx in range(colours_per_palette):
                 for j in range(3):
                     cam.data[j] = palette_cam[palette_entry_idx, j]
                 pixel_dist = common.colour_distance_squared(pixel_cam.data, cam.data)
@@ -319,15 +323,20 @@ def convert_rgb12_iigs_to_cam(float [:, ::1] rgb12_iigs_to_cam16ucs, (unsigned c
 
 
 @cython.cdivision(True)
+@cython.cpow(True)
 cdef float[:, ::1] linear_to_srgb_array(float[:, ::1] a, float gamma=2.4):
     cdef int i, j
+    cdef float val
     cdef float[:, ::1] res = np.empty_like(a, dtype=np.float32)
     for i in range(res.shape[0]):
         for j in range(3):
-            if a[i, j] <= 0.0031308:
-                res[i, j] = a[i, j] * 12.92
+            val = a[i, j]
+            if val <= 0:
+                res[i, j] = 0
+            elif val <= 0.0031308:
+                res[i, j] = val * 12.92
             else:
-                res[i, j] = 1.055 * a[i, j] ** (1.0 / gamma) - 0.055
+                res[i, j] = 1.055 * val ** (1.0 / gamma) - 0.055
     return res
 
 
@@ -378,8 +387,8 @@ def k_means_with_fixed_centroids(
     last_total_error = 1e9
     for iteration in range(max_iterations):
         total_error = 0.0
-        centroid_cam_sample_positions_total = np.zeros((16, 3), dtype=np.float32)
-        centroid_sample_counts = np.zeros(16, dtype=np.int32)
+        centroid_cam_sample_positions_total = np.zeros((n_clusters, 3), dtype=np.float32)
+        centroid_sample_counts = np.zeros(n_clusters, dtype=np.int32)
 
         # For each sample, associate it to the closest centroid.  We want to compute the mean of all associated samples
         # but we do this by accumulating the (coordinate vector) total and number of associated samples.

@@ -25,12 +25,40 @@ class SHR320Screen:
         self.palettes = {k: np.zeros((16, 3), dtype=np.uint8) for k in
                          range(16)}
         # Really 4-bit values, indexing into palette
-        self.pixels = np.array((self.Y_RES, self.X_RES), dtype=np.uint8)
+        self.pixels = np.array((self.Y_RES, self.X_RES), dtype=np.uint)
 
         # Choice of palette per scan-line
         self.line_palette = np.zeros(self.Y_RES, dtype=np.uint8)
 
         self.memory = None
+
+    @staticmethod
+    def load_palettes(filename: str) -> np.ndarray:
+        """Load 16 palettes from an existing SHR file.
+
+        Returns a (16, 16, 3) uint8 array of 4-bit RGB palette entries.
+        """
+        with open(filename, "rb") as f:
+            data = f.read()
+
+        if len(data) != 32768:
+            raise ValueError(
+                "SHR file %s is %d bytes, expected 32768" % (
+                    filename, len(data)))
+
+        palette_offset = 320 * 200 // 2 + 256  # 0x5100
+        palettes = np.zeros((16, 16, 3), dtype=np.uint8)
+        for palette_idx in range(16):
+            for colour_idx in range(16):
+                offset = palette_offset + 32 * palette_idx + 2 * colour_idx
+                rgb_low = data[offset]
+                rgb_hi = data[offset + 1]
+                g = (rgb_low >> 4) & 0x0F
+                b = rgb_low & 0x0F
+                r = rgb_hi & 0x0F
+                palettes[palette_idx, colour_idx] = [r, g, b]
+
+        return palettes
 
     def set_palette(self, idx: int, palette: np.array):
         if idx < 0 or idx > 15:

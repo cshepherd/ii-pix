@@ -1,3 +1,4 @@
+import colorsys
 from collections import defaultdict
 import os.path
 import random
@@ -20,7 +21,7 @@ import image as image_py
 class ClusterPalette:
     def __init__(
             self, image: np.ndarray, rgb12_iigs_to_cam16ucs, rgb24_to_cam16ucs,
-            fixed_colours=0):
+            fixed_colours=0, reserve_colours=0, dither='floyd-steinberg'):
 
         # Conversion matrix from 12-bit //gs RGB colour space to CAM16UCS
         # colour space
@@ -29,6 +30,15 @@ class ClusterPalette:
         # Conversion matrix from 24-bit linear RGB colour space to CAM16UCS
         # colour space
         self._rgb24_to_cam16ucs = rgb24_to_cam16ucs
+
+        # How many palette entries to reserve (for e.g. sprites).  Background
+        # image uses palette entries 0 .. colours_per_palette-1; entries
+        # colours_per_palette .. 15 are left zeroed for the caller to fill.
+        self._reserve_colours = reserve_colours
+        self._colours_per_palette = 16 - reserve_colours
+
+        # Dithering algorithm: 'floyd-steinberg', 'jarvis', or 'none'
+        self._dither = dither
 
         # Preprocessed source image in 24-bit linear RGB colour space.  We
         # first dither the source image using the full 12-bit //gs RGB colour
@@ -41,21 +51,23 @@ class ClusterPalette:
         # Preprocessed source image in CAM16UCS colour space
         self._colours_cam = self._image_colours_cam(self._image_rgb)
 
-        # We fit a 16-colour palette against the entire image which is used
-        # as starting values for fitting the reserved colours in the 16 SHR
-        # palettes.
-        self._global_palette = np.empty((16, 3), dtype=np.uint8)
+        # We fit a palette against the entire image which is used as starting
+        # values for fitting the reserved colours in the 16 SHR palettes.
+        self._global_palette = np.empty(
+            (self._colours_per_palette, 3), dtype=np.uint8)
 
         # How many image colours to fix identically across all 16 SHR
         # palettes.  These are taken to be the most prevalent colours from
         # _global_palette.
         self._fixed_colours = fixed_colours
 
-        # 16 SHR palettes each of 16 colours, in CAM16UCS colour space
-        self._palettes_cam = np.empty((16, 16, 3), dtype=np.float32)
+        # 16 SHR palettes each of 16 colours, in CAM16UCS colour space.
+        # Only the first colours_per_palette entries per palette are used;
+        # the rest are zeroed (reserved for sprites).
+        self._palettes_cam = np.zeros((16, 16, 3), dtype=np.float32)
 
         # 16 SHR palettes each of 16 colours, in //gs 4-bit RGB colour space
-        self._palettes_rgb = np.empty((16, 16, 3), dtype=np.uint8)
+        self._palettes_rgb = np.zeros((16, 16, 3), dtype=np.uint8)
 
         # defaultdict(list) mapping palette index to the lines that use this
         # palette
@@ -123,7 +135,7 @@ class ClusterPalette:
 
         total_image_error, image_rgb = dither_shr_pyx.dither_shr_perfect(
             source_image, self._rgb12_iigs_to_cam16ucs, full_palette_linear_rgb,
-            self._rgb24_to_cam16ucs)
+            self._rgb24_to_cam16ucs, self._dither)
         # print("Perfect image error:", total_image_error)
         return image_rgb
 
@@ -137,7 +149,8 @@ class ClusterPalette:
         output_4bit, line_to_palette, total_image_error, palette_line_errors = \
             dither_shr_pyx.dither_shr(
                 self._image_rgb, palettes_cam, palettes_linear_rgb,
-                self._rgb24_to_cam16ucs)
+                self._rgb24_to_cam16ucs, self._colours_per_palette,
+                self._dither)
 
         # Update map of palettes to image lines for which the palette was the
         # best match
@@ -209,8 +222,8 @@ class ClusterPalette:
 
         XXX update
         """
-        new_palettes_cam = np.empty_like(self._palettes_cam)
-        new_palettes_rgb12_iigs = np.empty_like(self._palettes_rgb)
+        new_palettes_cam = np.zeros_like(self._palettes_cam)
+        new_palettes_rgb12_iigs = np.zeros_like(self._palettes_rgb)
 
         # Compute a new 16-colour global palette for the entire image,
         # used as the starting center positions for k-means clustering of the
@@ -222,6 +235,8 @@ class ClusterPalette:
                 self._colours_cam[self._palette_lines[
                                       palette_idx], :, :].reshape(-1, 3))
 
+            n = self._colours_per_palette
+
             # Fix reserved colours from the global palette.
             initial_centroids = np.copy(self._global_palette)
             pixels_rgb_iigs = dither_shr_pyx.convert_cam16ucs_to_rgb12_iigs(
@@ -232,7 +247,7 @@ class ClusterPalette:
 
             # Pick unique random colours from the sample points for the
             # remaining initial centroids.
-            for i in range(self._fixed_colours, 16):
+            for i in range(self._fixed_colours, n):
                 choice = np.random.randint(0, pixels_rgb_iigs.shape[0])
                 new_colour = pixels_rgb_iigs[choice, :]
                 if tuple(new_colour) in seen_colours:
@@ -252,7 +267,7 @@ class ClusterPalette:
             for palette_colour, freq in most_frequent_colours:
                 if (freq < (palette_pixels.shape[0] *
                             fixed_colour_fraction_threshold)) or (
-                        fixed_colours == 16):
+                        fixed_colours == n):
                     break
                 if tuple(palette_colour) not in seen_colours:
                     seen_colours.add(tuple(palette_colour))
@@ -260,42 +275,43 @@ class ClusterPalette:
                     fixed_colours += 1
 
             palette_rgb12_iigs = dither_shr_pyx.k_means_with_fixed_centroids(
-                n_clusters=16, n_fixed=fixed_colours,
+                n_clusters=n, n_fixed=fixed_colours,
                 samples=palette_pixels,
                 initial_centroids=initial_centroids,
                 max_iterations=1000,
                 rgb12_iigs_to_cam16ucs=self._rgb12_iigs_to_cam16ucs)
-            # If the k-means clustering returned fewer than 16 unique colours,
-            # fill out the remainder with the most common pixels colours that
-            # have not yet been used.
+            # If the k-means clustering returned fewer than the target number
+            # of unique colours, fill out the remainder with the most common
+            # pixel colours that have not yet been used.
             #
             # TODO: this seems like an opportunity to do something better -
             #   e.g. forcibly split clusters and iterate the clustering
             palette_rgb12_iigs = self._fill_short_palette(
                 palette_rgb12_iigs, most_frequent_colours)
 
-            for i in range(16):
+            for i in range(n):
                 new_palettes_cam[palette_idx, i, :] = (
                     np.array(dither_shr_pyx.convert_rgb12_iigs_to_cam(
                         self._rgb12_iigs_to_cam16ucs, palette_rgb12_iigs[
                             i]), dtype=np.float32))
 
-            new_palettes_rgb12_iigs[palette_idx, :, :] = palette_rgb12_iigs
+            new_palettes_rgb12_iigs[palette_idx, :n, :] = palette_rgb12_iigs
 
         self._palettes_accepted = False
         return new_palettes_cam, new_palettes_rgb12_iigs
 
     def _fit_global_palette(self):
-        """Compute a 16-colour palette for the entire image to use as
-        starting point for the sub-palettes.  This should help when the image
-        has large blocks of colour since the sub-palettes will tend to pick the
-        same colours."""
+        """Compute a palette for the entire image to use as starting point
+        for the sub-palettes.  This should help when the image has large
+        blocks of colour since the sub-palettes will tend to pick the same
+        colours."""
 
-        clusters = cluster.MiniBatchKMeans(n_clusters=16, max_iter=10000)
+        n = self._colours_per_palette
+        clusters = cluster.MiniBatchKMeans(n_clusters=n, max_iter=10000)
         clusters.fit_predict(self._colours_cam.reshape(-1, 3))
 
         # Dict of {palette idx : frequency count}
-        palette_freq = {idx: 0 for idx in range(16)}
+        palette_freq = {idx: 0 for idx in range(n)}
         for idx, freq in zip(*np.unique(clusters.labels_, return_counts=True)):
             palette_freq[idx] = freq
 
@@ -308,9 +324,10 @@ class ClusterPalette:
                 clusters.cluster_centers_[frequency_order].astype(
                     np.float32)))
 
-    @staticmethod
-    def _fill_short_palette(palette_iigs_rgb, most_frequent_colours):
-        """Fill out the palette to 16 unique entries."""
+    def _fill_short_palette(self, palette_iigs_rgb, most_frequent_colours):
+        """Fill out the palette to colours_per_palette unique entries."""
+
+        target = self._colours_per_palette
 
         # We want to maintain order of insertion so that we respect the
         # ordering of fixed colours in the palette.  Python doesn't have an
@@ -318,7 +335,7 @@ class ClusterPalette:
         palette_set = {}
         for palette_entry in palette_iigs_rgb:
             palette_set[tuple(palette_entry)] = True
-        if len(palette_set) == 16:
+        if len(palette_set) == target:
             return palette_iigs_rgb
 
         # Add most frequent image colours that are not yet in the palette
@@ -326,11 +343,11 @@ class ClusterPalette:
             if tuple(palette_colour) in palette_set:
                 continue
             palette_set[tuple(palette_colour)] = True
-            if len(palette_set) == 16:
+            if len(palette_set) == target:
                 break
 
         # We couldn't find any more unique colours, fill out with random ones.
-        while len(palette_set) < 16:
+        while len(palette_set) < target:
             palette_set[
                 tuple(np.random.randint(0, 16, size=3, dtype=np.uint8))] = True
 
@@ -362,7 +379,185 @@ class ClusterPalette:
             self._palette_lines[palette_idx] = [worst_line]
 
 
+def _output_image(screen, output_4bit, line_to_palette, palettes_rgb12_iigs,
+                  palettes_linear_rgb, args, output_base, output_ext, seq,
+                  canvas=None, total_image_error=None,
+                  new_total_image_error=None):
+    """Common output logic shared by both conversion modes."""
+    if args.verbose and total_image_error is not None:
+        print("Improved quality +%f%% (%f)" % (
+            (1 - new_total_image_error / total_image_error) * 100,
+            new_total_image_error))
+
+    palette_order = getattr(args, 'palette_order', 'none')
+    if palette_order == 'hue':
+        reserve = getattr(args, 'reserve_colours', 0)
+        n_active = 16 - reserve
+
+        # Build a canonical ordering from all unique colours across every
+        # palette, sorted by (hue, saturation, value).  Each palette's
+        # entries are then sorted by their position in this master list,
+        # so a colour that appears in multiple palettes lands at the same
+        # (or very close) index in each.
+        canonical_key = {}  # (r,g,b) -> (h, s, v)
+        for pal_idx in range(16):
+            for c in range(n_active):
+                rgb = tuple(int(v) for v in palettes_rgb12_iigs[pal_idx, c, :])
+                if rgb not in canonical_key:
+                    h, s, v = colorsys.rgb_to_hsv(
+                        rgb[0] / 15, rgb[1] / 15, rgb[2] / 15)
+                    canonical_key[rgb] = (h, s, v)
+
+        for pal_idx in range(16):
+            # Sort this palette's active entries by canonical HSV key
+            keys = []
+            for c in range(n_active):
+                rgb = tuple(int(v) for v in palettes_rgb12_iigs[pal_idx, c, :])
+                keys.append(canonical_key[rgb])
+            order = sorted(range(n_active), key=lambda i: keys[i])
+
+            # Build inverse map: order[new] = old, so inv[old] = new
+            inv = [0] * n_active
+            for new_idx, old_idx in enumerate(order):
+                inv[old_idx] = new_idx
+
+            # Reorder palette arrays
+            palettes_rgb12_iigs[pal_idx, :n_active, :] = (
+                palettes_rgb12_iigs[pal_idx, order, :])
+            palettes_linear_rgb[pal_idx, :n_active, :] = (
+                palettes_linear_rgb[pal_idx, order, :])
+
+            # Remap pixel indices on lines that use this palette
+            for y in range(200):
+                if line_to_palette[y] == pal_idx:
+                    for x in range(320):
+                        old = output_4bit[y, x]
+                        if old < n_active:
+                            output_4bit[y, x] = inv[old]
+
+    for i in range(16):
+        screen.set_palette(i, palettes_rgb12_iigs[i, :, :])
+
+    screen.set_pixels(output_4bit)
+    output_rgb = np.empty((200, 320, 3), dtype=np.uint8)
+    for i in range(200):
+        screen.line_palette[i] = line_to_palette[i]
+        output_rgb[i, :, :] = (
+                palettes_linear_rgb[line_to_palette[i]][
+                    output_4bit[i, :]] * 255
+        ).astype(np.uint8)
+
+    output_srgb = (image_py.linear_to_srgb(output_rgb)).astype(np.uint8)
+    out_image = image_py.resize(
+        Image.fromarray(output_srgb), screen.X_RES * 2, screen.Y_RES * 2,
+        srgb_output=True)
+
+    if args.show_output and canvas is not None:
+        surface = pygame.surfarray.make_surface(
+            np.asarray(out_image).transpose((1, 0, 2)))
+        canvas.blit(surface, (0, 0))
+        pygame.display.set_caption("][-Pix image preview [Iteration %d]"
+                                   % seq)
+        pygame.event.pump()
+        pygame.display.flip()
+
+    unique_colours = np.unique(
+        palettes_rgb12_iigs.reshape(-1, 3), axis=0).shape[0]
+    if args.verbose:
+        print("%d unique colours" % unique_colours)
+
+    if args.save_preview:
+        if args.save_intermediate:
+            outfile = "%s-%d-preview.png" % (output_base, seq)
+        else:
+            outfile = "%s-preview.png" % output_base
+        out_image.save(outfile, "PNG")
+    screen.pack()
+
+    if args.save_intermediate:
+        outfile = "%s-%d%s" % (output_base, seq, output_ext)
+    else:
+        outfile = "%s%s" % (output_base, output_ext)
+    with open(outfile, "wb") as f:
+        f.write(bytes(screen.memory))
+
+
+def convert_fixed_palettes(screen, image: Image, args):
+    """Convert image using pre-existing palettes from an SHR file."""
+
+    from screen import SHR320Screen
+
+    rgb = np.array(image).astype(np.float32) / 255
+
+    base_dir = os.path.dirname(__file__)
+    rgb24_to_cam16ucs = np.load(
+        os.path.join(base_dir, "data/rgb24_to_cam16ucs.npy"))
+    rgb12_iigs_to_cam16ucs = np.load(
+        os.path.join(base_dir, "data/rgb12_iigs_to_cam16ucs.npy"))
+
+    # Load palettes from the existing SHR file
+    palettes_rgb12_iigs = SHR320Screen.load_palettes(args.palette_file)
+    if args.verbose:
+        print("Loaded palettes from %s" % args.palette_file)
+
+    # Convert palettes to CAM16UCS for perceptual dithering
+    palettes_cam = np.zeros((16, 16, 3), dtype=np.float32)
+    for palette_idx in range(16):
+        for colour_idx in range(16):
+            palettes_cam[palette_idx, colour_idx, :] = np.array(
+                dither_shr_pyx.convert_rgb12_iigs_to_cam(
+                    rgb12_iigs_to_cam16ucs,
+                    palettes_rgb12_iigs[palette_idx, colour_idx]),
+                dtype=np.float32)
+
+    # Convert palettes to linear RGB for output rendering
+    with colour.utilities.suppress_warnings(python_warnings=True):
+        palettes_linear_rgb = colour.convert(
+            palettes_cam, "CAM16UCS", "RGB").astype(np.float32)
+
+    if args.show_output:
+        pygame.init()
+        canvas = pygame.display.set_mode((640, 400))
+        canvas.fill((0, 0, 0))
+        pygame.display.set_caption("][-Pix image preview")
+        pygame.event.pump()
+        pygame.display.flip()
+    else:
+        canvas = None
+
+    colours_per_palette = 16 - getattr(args, 'reserve_colours', 0)
+
+    # Pre-dither the image to the full 12-bit //gs palette, same as the
+    # normal path, to give consistent starting pixels for the final dither.
+    with colour.utilities.suppress_warnings(python_warnings=True):
+        full_palette_linear_rgb = colour.convert(
+            rgb12_iigs_to_cam16ucs, "CAM16UCS", "RGB").astype(np.float32)
+    dither = getattr(args, 'dither', 'floyd-steinberg')
+    _, image_rgb = dither_shr_pyx.dither_shr_perfect(
+        rgb, rgb12_iigs_to_cam16ucs, full_palette_linear_rgb,
+        rgb24_to_cam16ucs, dither)
+
+    # Dither against the fixed palettes
+    output_4bit, line_to_palette, total_image_error, _ = \
+        dither_shr_pyx.dither_shr(
+            image_rgb, palettes_cam, palettes_linear_rgb,
+            rgb24_to_cam16ucs, colours_per_palette, dither)
+
+    output_base, output_ext = os.path.splitext(args.output)
+
+    _output_image(screen, output_4bit, line_to_palette, palettes_rgb12_iigs,
+                  palettes_linear_rgb, args, output_base, output_ext, seq=0,
+                  canvas=canvas)
+
+    if args.show_final_score:
+        print("FINAL_SCORE:", total_image_error)
+
+
 def convert(screen, image: Image, args):
+    palette_file = getattr(args, 'palette_file', None)
+    if palette_file:
+        return convert_fixed_palettes(screen, image, args)
+
     rgb = np.array(image).astype(np.float32) / 255
 
     # Conversion matrix from RGB to CAM16UCS colour values.  Indexed by
@@ -384,10 +579,16 @@ def convert(screen, image: Image, args):
         pygame.display.set_caption("][-Pix image preview")
         pygame.event.pump()  # Update caption
         pygame.display.flip()
+    else:
+        canvas = None
 
     total_image_error = None
+    reserve_colours = getattr(args, 'reserve_colours', 0)
+    dither = getattr(args, 'dither', 'floyd-steinberg')
     cluster_palette = ClusterPalette(
         rgb, fixed_colours=args.fixed_colours,
+        reserve_colours=reserve_colours,
+        dither=dither,
         rgb12_iigs_to_cam16ucs=rgb12_iigs_to_cam16ucs,
         rgb24_to_cam16ucs=rgb24_to_cam16ucs)
 
@@ -400,58 +601,12 @@ def convert(screen, image: Image, args):
             palettes_linear_rgb
     ) in cluster_palette.iterate(inner_iterations, outer_iterations):
 
-        if args.verbose and total_image_error is not None:
-            print("Improved quality +%f%% (%f)" % (
-                (1 - new_total_image_error / total_image_error) * 100,
-                new_total_image_error))
+        _output_image(screen, output_4bit, line_to_palette,
+                      palettes_rgb12_iigs, palettes_linear_rgb, args,
+                      output_base, output_ext, seq, canvas=canvas,
+                      total_image_error=total_image_error,
+                      new_total_image_error=new_total_image_error)
         total_image_error = new_total_image_error
-        for i in range(16):
-            screen.set_palette(i, palettes_rgb12_iigs[i, :, :])
-
-        # Recompute current screen RGB image
-        screen.set_pixels(output_4bit)
-        output_rgb = np.empty((200, 320, 3), dtype=np.uint8)
-        for i in range(200):
-            screen.line_palette[i] = line_to_palette[i]
-            output_rgb[i, :, :] = (
-                    palettes_linear_rgb[line_to_palette[i]][
-                        output_4bit[i, :]] * 255
-            ).astype(np.uint8)
-
-        output_srgb = (image_py.linear_to_srgb(output_rgb)).astype(np.uint8)
-        out_image = image_py.resize(
-            Image.fromarray(output_srgb), screen.X_RES * 2, screen.Y_RES * 2,
-            srgb_output=True)
-
-        if args.show_output:
-            surface = pygame.surfarray.make_surface(
-                np.asarray(out_image).transpose((1, 0, 2)))  # flip y/x axes
-            canvas.blit(surface, (0, 0))
-            pygame.display.set_caption("][-Pix image preview [Iteration %d]"
-                                       % seq)
-            pygame.event.pump()  # Update caption
-            pygame.display.flip()
-
-        unique_colours = np.unique(
-            palettes_rgb12_iigs.reshape(-1, 3), axis=0).shape[0]
-        if args.verbose:
-            print("%d unique colours" % unique_colours)
-
-        if args.save_preview:
-            # Save super hi-res image
-            if args.save_intermediate:
-                outfile = "%s-%d-preview.png" % (output_base, seq)
-            else:
-                outfile = "%s-preview.png" % output_base
-            out_image.save(outfile, "PNG")
-        screen.pack()
-
-        if args.save_intermediate:
-            outfile = "%s-%d%s" % (output_base, seq, output_ext)
-        else:
-            outfile = "%s%s" % (output_base, output_ext)
-        with open(outfile, "wb") as f:
-            f.write(bytes(screen.memory))
 
         seq += 1
 

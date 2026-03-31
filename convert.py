@@ -108,9 +108,20 @@ def main():
     shr_parser = subparsers.add_parser("shr")
     add_common_args(shr_parser)
     shr_parser.add_argument(
+        '--dither', type=str, choices=['floyd-steinberg', 'jarvis', 'none'],
+        default='floyd-steinberg',
+        help='Dithering algorithm to use, or "none" for no dithering '
+             '(default: floyd-steinberg)')
+    shr_parser.add_argument(
         '--fixed-colours', type=int, default=0,
         help='How many colours to fix as identical across all 16 SHR palettes '
              '(default: 0)'
+    )
+    shr_parser.add_argument(
+        '--reserve-colours', type=int, default=0,
+        help='How many palette entries per scanline to reserve for sprites. '
+             'The background image will use 16 - N colours per palette, '
+             'leaving entries N..15 free. (default: 0)'
     )
     shr_parser.add_argument(
         '--show-final-score', action=argparse.BooleanOptionalAction,
@@ -121,6 +132,18 @@ def main():
         '--save-intermediate', action=argparse.BooleanOptionalAction,
         default=False, help='Whether to save each intermediate iteration, '
                             'or just the final image (default: False)'
+    )
+    shr_parser.add_argument(
+        '--palette-order', type=str, choices=['none', 'hue'],
+        default='none',
+        help='Reorder palette entries before output.  "hue" sorts by hue '
+             'so the same colour tends to land at the same index across '
+             'palettes (default: none)')
+    shr_parser.add_argument(
+        '--palette-file', type=str, default=None,
+        help='Path to an existing .SHR file whose palettes will be reused '
+             'exactly.  ii-pix will only choose which palette and colours '
+             'to use per scanline/pixel. (default: None)'
     )
     shr_parser.set_defaults(func=convert_shr)
     args = parser.parse_args()
