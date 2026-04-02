@@ -389,6 +389,75 @@ def _output_image(screen, output_4bit, line_to_palette, palettes_rgb12_iigs,
             (1 - new_total_image_error / total_image_error) * 100,
             new_total_image_error))
 
+    palette_tolerance = getattr(args, 'palette_tolerance', 0)
+    if palette_tolerance > 0:
+        reserve = getattr(args, 'reserve_colours', 0)
+        n_active = 16 - reserve
+        tol_sq = palette_tolerance * palette_tolerance
+
+        # Collect every colour and count how often it appears across all
+        # palette slots so we can pick the most common as representative.
+        colour_freq = {}
+        for pal_idx in range(16):
+            for c in range(n_active):
+                rgb = tuple(int(v) for v in palettes_rgb12_iigs[pal_idx, c, :])
+                colour_freq[rgb] = colour_freq.get(rgb, 0) + 1
+
+        # Greedy clustering: iterate colours from most to least frequent.
+        # Each colour either joins an existing cluster (if within tolerance
+        # of its representative) or starts a new one.
+        sorted_colours = sorted(colour_freq, key=colour_freq.get, reverse=True)
+        clusters = []  # list of (representative_rgb, set of member rgbs)
+        colour_to_rep = {}
+
+        for rgb in sorted_colours:
+            best_dist = tol_sq + 1
+            best_rep = None
+            for rep, _ in clusters:
+                d = sum((a - b) ** 2 for a, b in zip(rgb, rep))
+                if d < best_dist:
+                    best_dist = d
+                    best_rep = rep
+            if best_dist <= tol_sq:
+                colour_to_rep[rgb] = best_rep
+                # Add to existing cluster
+                for rep, members in clusters:
+                    if rep == best_rep:
+                        members.add(rgb)
+                        break
+            else:
+                # New cluster — this colour is its own representative
+                colour_to_rep[rgb] = rgb
+                clusters.append((rgb, {rgb}))
+
+        # Precompute linear RGB for each representative colour.
+        rgb12_iigs_to_cam16ucs = np.load(
+            os.path.join(os.path.dirname(__file__),
+                         "data/rgb12_iigs_to_cam16ucs.npy"))
+        rep_linear_rgb = {}
+        for rep, _ in clusters:
+            cam = np.array(dither_shr_pyx.convert_rgb12_iigs_to_cam(
+                rgb12_iigs_to_cam16ucs, np.array(rep, dtype=np.uint8)),
+                dtype=np.float32).reshape(1, 3)
+            with colour.utilities.suppress_warnings(python_warnings=True):
+                rep_linear_rgb[rep] = colour.convert(
+                    cam, "CAM16UCS", "RGB").astype(np.float32)[0]
+
+        # Apply: replace every palette entry with its representative.
+        for pal_idx in range(16):
+            for c in range(n_active):
+                rgb = tuple(int(v) for v in palettes_rgb12_iigs[pal_idx, c, :])
+                rep = colour_to_rep[rgb]
+                if rep != rgb:
+                    for i in range(3):
+                        palettes_rgb12_iigs[pal_idx, c, i] = rep[i]
+                    palettes_linear_rgb[pal_idx, c, :] = rep_linear_rgb[rep]
+
+        if args.verbose:
+            merged = sum(1 for rgb, rep in colour_to_rep.items() if rgb != rep)
+            print("Palette tolerance: merged %d colours into %d clusters" % (
+                merged, len(clusters)))
+
     palette_order = getattr(args, 'palette_order', 'none')
     if palette_order == 'hue':
         reserve = getattr(args, 'reserve_colours', 0)

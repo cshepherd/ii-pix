@@ -134,6 +134,14 @@ def main():
                             'or just the final image (default: False)'
     )
     shr_parser.add_argument(
+        '--palette-tolerance', type=float, default=0,
+        help='Merge palette colours across all palettes whose Euclidean '
+             'distance in 4-bit RGB space is within this threshold, snapping '
+             'them to a single representative value.  Useful for sprites '
+             'that need identical colour values across palettes.  '
+             'A value of 1 merges colours that differ by at most 1 step in '
+             'a single channel (default: 0, disabled)')
+    shr_parser.add_argument(
         '--palette-order', type=str, choices=['none', 'hue'],
         default='none',
         help='Reorder palette entries before output.  "hue" sorts by hue '
@@ -145,18 +153,36 @@ def main():
              'exactly.  ii-pix will only choose which palette and colours '
              'to use per scanline/pixel. (default: None)'
     )
+    shr_parser.add_argument(
+        '--no-upscale', action='store_true', default=False,
+        help='If the input image is smaller than 320x200, do not scale it up. '
+             'Instead, place it at the top-left and fill the remaining area '
+             'with black. (default: False)'
+    )
     shr_parser.set_defaults(func=convert_shr)
     args = parser.parse_args()
     args.func(args)
 
 
 def prepare_image(image_filename: str, show_input: bool, screen,
-                  gamma_correct: float) -> np.ndarray:
+                  gamma_correct: float,
+                  no_upscale: bool = False) -> np.ndarray:
     # Open and resize source image
     image = image_py.open(image_filename)
     if show_input:
         image_py.resize(image, screen.X_RES, screen.Y_RES * 2,
                         srgb_output=True).show()
+
+    if no_upscale and image.width <= screen.X_RES and \
+            image.height <= screen.Y_RES:
+        # Convert to linear RGB at original size, then pad to screen resolution
+        from PIL import Image
+        linear = image_py.resize(image, image.width, image.height,
+                                 gamma=gamma_correct)
+        padded = Image.new(linear.mode, (screen.X_RES, screen.Y_RES), (0, 0, 0))
+        padded.paste(linear, (0, 0))
+        return padded
+
     return image_py.resize(image, screen.X_RES, screen.Y_RES,
                            gamma=gamma_correct)
 
@@ -187,7 +213,8 @@ def convert_dhr_mono(args):
 def convert_shr(args):
     screen = screen_py.SHR320Screen()
     image = prepare_image(args.input, args.show_input, screen,
-                          args.gamma_correct)
+                          args.gamma_correct,
+                          no_upscale=args.no_upscale)
     convert_shr_py.convert(screen, image, args)
 
 
