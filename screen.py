@@ -60,6 +60,26 @@ class SHR320Screen:
 
         return palettes
 
+    @staticmethod
+    def load_scbs(filename: str) -> np.ndarray:
+        """Load 200 scan-line control bytes from an existing SHR file.
+
+        Returns a (200,) uint8 array of palette indices (low 4 bits of SCB).
+        """
+        with open(filename, "rb") as f:
+            data = f.read()
+
+        if len(data) != 32768:
+            raise ValueError(
+                "SHR file %s is %d bytes, expected 32768" % (
+                    filename, len(data)))
+
+        scb_offset = 320 * 200 // 2  # 32000
+        scbs = np.zeros(200, dtype=np.uint8)
+        for y in range(200):
+            scbs[y] = data[scb_offset + y] & 0x0F
+        return scbs
+
     def set_palette(self, idx: int, palette: np.array):
         if idx < 0 or idx > 15:
             raise ValueError("Palette index %s must be in range 0 .. 15" % idx)

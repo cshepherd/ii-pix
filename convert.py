@@ -154,6 +154,13 @@ def main():
              'to use per scanline/pixel. (default: None)'
     )
     shr_parser.add_argument(
+        '--palette-and-scb-file', type=str, default=None,
+        help='Path to an existing .SHR file whose palettes and scanline '
+             'control bytes (palette-per-line assignments) will be reused '
+             'exactly.  ii-pix will only choose which colour to use per '
+             'pixel. (default: None)'
+    )
+    shr_parser.add_argument(
         '--no-upscale', action='store_true', default=False,
         help='If the input image is smaller than 320x200, do not scale it up. '
              'Instead, place it at the top-left and fill the remaining area '

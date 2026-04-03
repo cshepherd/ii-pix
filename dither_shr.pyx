@@ -130,7 +130,8 @@ def dither_shr_perfect(
 
 def dither_shr(
         float[:, :, ::1] input_rgb, float[:, :, ::1] palettes_cam, float[:, :, ::1] palettes_rgb,
-        float[:,::1] rgb_to_cam16ucs, int colours_per_palette=16, str dither='floyd-steinberg'):
+        float[:,::1] rgb_to_cam16ucs, int colours_per_palette=16, str dither='floyd-steinberg',
+        fixed_line_to_palette=None):
     cdef int y, x, idx, best_colour_idx, best_palette, i, j
     cdef double best_distance, distance, total_image_error
     cdef float[::1] best_colour_rgb
@@ -148,21 +149,25 @@ def dither_shr(
     cdef float decay = 0.5
     cdef int floyd_steinberg = 1 if dither == 'floyd-steinberg' else 0
     cdef int no_dither = 1 if dither == 'none' else 0
+    cdef int use_fixed_palettes = fixed_line_to_palette is not None
 
     cdef common.float3 pixel_cam, cam
 
     best_palette = -1
     total_image_error = 0.0
     for y in range(200):
-        for x in range(320):
-            pixel_cam = common.convert_rgb_to_cam16ucs(
-                rgb_to_cam16ucs, working_image[y,x,0], working_image[y,x,1], working_image[y,x,2])
-            for j in range(3):
-                line_cam[x, j] = pixel_cam.data[j]
+        if use_fixed_palettes:
+            best_palette = fixed_line_to_palette[y]
+        else:
+            for x in range(320):
+                pixel_cam = common.convert_rgb_to_cam16ucs(
+                    rgb_to_cam16ucs, working_image[y,x,0], working_image[y,x,1], working_image[y,x,2])
+                for j in range(3):
+                    line_cam[x, j] = pixel_cam.data[j]
 
-        palette_line = best_palette_for_line(line_cam, palettes_cam, best_palette, colours_per_palette)
-        best_palette = palette_line.palette_idx
-        palette_line_errors[y] = palette_line.total_error
+            palette_line = best_palette_for_line(line_cam, palettes_cam, best_palette, colours_per_palette)
+            best_palette = palette_line.palette_idx
+            palette_line_errors[y] = palette_line.total_error
 
         palette_rgb = palettes_rgb[best_palette, :, :]
         palette_cam = palettes_cam[best_palette, :, :]

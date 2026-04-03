@@ -551,7 +551,7 @@ def _output_image(screen, output_4bit, line_to_palette, palettes_rgb12_iigs,
         f.write(bytes(screen.memory))
 
 
-def convert_fixed_palettes(screen, image: Image, args):
+def convert_fixed_palettes(screen, image: Image, args, fixed_scbs=False):
     """Convert image using pre-existing palettes from an SHR file."""
 
     from screen import SHR320Screen
@@ -564,10 +564,16 @@ def convert_fixed_palettes(screen, image: Image, args):
     rgb12_iigs_to_cam16ucs = np.load(
         os.path.join(base_dir, "data/rgb12_iigs_to_cam16ucs.npy"))
 
-    # Load palettes from the existing SHR file
-    palettes_rgb12_iigs = SHR320Screen.load_palettes(args.palette_file)
+    # Load palettes (and optionally SCBs) from the existing SHR file
+    ref_file = args.palette_and_scb_file if fixed_scbs else args.palette_file
+    palettes_rgb12_iigs = SHR320Screen.load_palettes(ref_file)
+    fixed_line_to_palette = None
+    if fixed_scbs:
+        fixed_line_to_palette = SHR320Screen.load_scbs(ref_file).astype(
+            np.int32)
     if args.verbose:
-        print("Loaded palettes from %s" % args.palette_file)
+        print("Loaded palettes%s from %s" % (
+            " and SCBs" if fixed_scbs else "", ref_file))
 
     # Convert palettes to CAM16UCS for perceptual dithering
     palettes_cam = np.zeros((16, 16, 3), dtype=np.float32)
@@ -610,7 +616,8 @@ def convert_fixed_palettes(screen, image: Image, args):
     output_4bit, line_to_palette, total_image_error, _ = \
         dither_shr_pyx.dither_shr(
             image_rgb, palettes_cam, palettes_linear_rgb,
-            rgb24_to_cam16ucs, colours_per_palette, dither)
+            rgb24_to_cam16ucs, colours_per_palette, dither,
+            fixed_line_to_palette=fixed_line_to_palette)
 
     output_base, output_ext = os.path.splitext(args.output)
 
@@ -623,6 +630,11 @@ def convert_fixed_palettes(screen, image: Image, args):
 
 
 def convert(screen, image: Image, args):
+    palette_and_scb_file = getattr(args, 'palette_and_scb_file', None)
+    if palette_and_scb_file:
+        return convert_fixed_palettes(screen, image, args,
+                                      fixed_scbs=True)
+
     palette_file = getattr(args, 'palette_file', None)
     if palette_file:
         return convert_fixed_palettes(screen, image, args)
