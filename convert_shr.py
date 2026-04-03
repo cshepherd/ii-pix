@@ -629,7 +629,95 @@ def convert_fixed_palettes(screen, image: Image, args, fixed_scbs=False):
         print("FINAL_SCORE:", total_image_error)
 
 
+def convert_one_palette(screen, image: Image, args):
+    """Convert image using a single 16-colour palette for all scanlines."""
+
+    rgb = np.array(image).astype(np.float32) / 255
+
+    base_dir = os.path.dirname(__file__)
+    rgb24_to_cam16ucs = np.load(
+        os.path.join(base_dir, "data/rgb24_to_cam16ucs.npy"))
+    rgb12_iigs_to_cam16ucs = np.load(
+        os.path.join(base_dir, "data/rgb12_iigs_to_cam16ucs.npy"))
+
+    reserve_colours = getattr(args, 'reserve_colours', 0)
+    colours_per_palette = 16 - reserve_colours
+    dither = getattr(args, 'dither', 'floyd-steinberg')
+
+    # Convert the source image to CAM16UCS for clustering
+    with colour.utilities.suppress_warnings(colour_usage_warnings=True):
+        image_cam = colour.convert(
+            rgb, "RGB", "CAM16UCS").astype(np.float32)
+
+    # Fit a single palette via k-means over the whole image
+    pixels_cam = image_cam.reshape(-1, 3)
+    kmeans = cluster.MiniBatchKMeans(
+        n_clusters=colours_per_palette, max_iter=10000)
+    kmeans.fit_predict(pixels_cam)
+
+    # Convert cluster centres to //gs 4-bit RGB
+    palette_rgb12 = dither_shr_pyx.convert_cam16ucs_to_rgb12_iigs(
+        kmeans.cluster_centers_.astype(np.float32))
+
+    # Replicate into all 16 palette slots
+    palettes_rgb12_iigs = np.zeros((16, 16, 3), dtype=np.uint8)
+    for i in range(16):
+        palettes_rgb12_iigs[i, :colours_per_palette, :] = palette_rgb12
+
+    # Build CAM16UCS and linear-RGB palette arrays
+    palettes_cam = np.zeros((16, 16, 3), dtype=np.float32)
+    for pal_idx in range(16):
+        for c_idx in range(16):
+            palettes_cam[pal_idx, c_idx, :] = np.array(
+                dither_shr_pyx.convert_rgb12_iigs_to_cam(
+                    rgb12_iigs_to_cam16ucs,
+                    palettes_rgb12_iigs[pal_idx, c_idx]),
+                dtype=np.float32)
+
+    with colour.utilities.suppress_warnings(python_warnings=True):
+        palettes_linear_rgb = colour.convert(
+            palettes_cam, "CAM16UCS", "RGB").astype(np.float32)
+
+    if args.show_output:
+        pygame.init()
+        canvas = pygame.display.set_mode((640, 400))
+        canvas.fill((0, 0, 0))
+        pygame.display.set_caption("][-Pix image preview")
+        pygame.event.pump()
+        pygame.display.flip()
+    else:
+        canvas = None
+
+    # Pre-dither to the full 12-bit palette
+    with colour.utilities.suppress_warnings(python_warnings=True):
+        full_palette_linear_rgb = colour.convert(
+            rgb12_iigs_to_cam16ucs, "CAM16UCS", "RGB").astype(np.float32)
+    _, image_rgb = dither_shr_pyx.dither_shr_perfect(
+        rgb, rgb12_iigs_to_cam16ucs, full_palette_linear_rgb,
+        rgb24_to_cam16ucs, dither)
+
+    # Dither with all lines locked to palette 0
+    fixed_line_to_palette = np.zeros(200, dtype=np.int32)
+    output_4bit, line_to_palette, total_image_error, _ = \
+        dither_shr_pyx.dither_shr(
+            image_rgb, palettes_cam, palettes_linear_rgb,
+            rgb24_to_cam16ucs, colours_per_palette, dither,
+            fixed_line_to_palette=fixed_line_to_palette)
+
+    output_base, output_ext = os.path.splitext(args.output)
+
+    _output_image(screen, output_4bit, line_to_palette, palettes_rgb12_iigs,
+                  palettes_linear_rgb, args, output_base, output_ext, seq=0,
+                  canvas=canvas)
+
+    if args.show_final_score:
+        print("FINAL_SCORE:", total_image_error)
+
+
 def convert(screen, image: Image, args):
+    if getattr(args, 'one_palette', False):
+        return convert_one_palette(screen, image, args)
+
     palette_and_scb_file = getattr(args, 'palette_and_scb_file', None)
     if palette_and_scb_file:
         return convert_fixed_palettes(screen, image, args,

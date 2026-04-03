@@ -161,6 +161,11 @@ def main():
              'pixel. (default: None)'
     )
     shr_parser.add_argument(
+        '--one-palette', action='store_true', default=False,
+        help='Use a single 16-colour palette for the entire image, with '
+             'the same palette assigned to every scanline. (default: False)'
+    )
+    shr_parser.add_argument(
         '--no-upscale', action='store_true', default=False,
         help='If the input image is smaller than 320x200, do not scale it up. '
              'Instead, place it at the top-left and fill the remaining area '
