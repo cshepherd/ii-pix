@@ -102,6 +102,12 @@ supported for `shr` conversions:
 * `--save-intermediate` Whether to save each intermediate iteration, or just the final image (default: False)
 * `--fixed-colours` How many colours to fix as identical across all 16 SHR palettes. (default: 0)
 * `--show-final-score` Whether to output the final image quality score (default: False)
+* `--3200` Convert to a 3200-colour image, i.e. an independent 16-colour palette for each of the 200 scanlines.
+  Scanline control bytes number the palettes from 15 down to 0 repeatedly (the final 8 scanlines continue the
+  descending order), for display code that rewrites the 16 hardware palettes on the fly from SCB interrupts.  The
+  output `.SHR` file contains the palettes for the first 16 scanlines in their assigned slots; all 200 palettes are
+  also written to `<output>.palettes` (32 bytes per palette in scanline order, same entry format as the SHR palette
+  region). (default: False)
 
 TODO: link to KansasFest 2022 talk slides/video for more details
 

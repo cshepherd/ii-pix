@@ -714,7 +714,208 @@ def convert_one_palette(screen, image: Image, args):
         print("FINAL_SCORE:", total_image_error)
 
 
+def _fit_line_palette(line_cam, colours_per_palette,
+                      rgb12_iigs_to_cam16ucs):
+    """Fit a palette to a single scanline via k-means in CAM16UCS space."""
+
+    pixels_rgb_iigs = dither_shr_pyx.convert_cam16ucs_to_rgb12_iigs(line_cam)
+    most_frequent_colours = sorted(list(zip(
+        *np.unique(pixels_rgb_iigs, return_counts=True, axis=0))),
+        key=lambda kv: kv[1], reverse=True)
+    unique_colours = [tuple(c) for c, _ in most_frequent_colours]
+
+    n = colours_per_palette
+    if len(unique_colours) <= n:
+        # The line has no more unique colours than palette entries, so the
+        # palette can represent it exactly.  Pad out short palettes by
+        # repeating the most frequent colour.
+        palette = list(unique_colours)
+        while len(palette) < n:
+            palette.append(unique_colours[0])
+        return np.array(palette, dtype=np.uint8)
+
+    # Seed k-means with the most frequent colours on the line.  As for the
+    # 16-palette mode, colours making up more than 10% of the line are fixed
+    # rather than clustered, to reduce artifacting on blocks of colour.
+    initial_centroids = np.array(unique_colours[:n], dtype=np.uint8)
+    fixed_colour_fraction_threshold = 0.1
+    n_fixed = 0
+    for _, freq in most_frequent_colours[:n]:
+        if freq < line_cam.shape[0] * fixed_colour_fraction_threshold:
+            break
+        n_fixed += 1
+
+    palette_rgb12_iigs = np.asarray(
+        dither_shr_pyx.k_means_with_fixed_centroids(
+            n_clusters=n, n_fixed=n_fixed,
+            samples=line_cam,
+            initial_centroids=initial_centroids,
+            max_iterations=1000,
+            rgb12_iigs_to_cam16ucs=rgb12_iigs_to_cam16ucs))
+
+    # k-means may converge with duplicate centroids; replace duplicates with
+    # the most frequent line colours not already in the palette.
+    palette_set = {}
+    for palette_entry in palette_rgb12_iigs:
+        palette_set[tuple(palette_entry)] = True
+    for c in unique_colours:
+        if len(palette_set) == n:
+            break
+        palette_set[c] = True
+    palette = list(palette_set.keys())
+    while len(palette) < n:
+        palette.append(palette[0])
+    return np.array(palette, dtype=np.uint8)
+
+
+def _output_image_3200(screen, output_4bit, palettes_rgb12_iigs,
+                       palettes_linear_rgb, args, canvas=None):
+    """Render, preview and write output files for 3200-colour mode.
+
+    Writes the standard 32768-byte SHR file, with SCBs numbering the
+    palettes from 15 down to 0 repeatedly and the 16 hardware palette slots
+    holding the palettes for the first 16 scanlines.  All 200 palettes are
+    also written to <output>.palettes (32 bytes per palette in scanline
+    order, same entry format as the SHR palette region).
+    """
+    screen.set_pixels(output_4bit)
+    output_rgb = np.empty((200, 320, 3), dtype=np.uint8)
+    for y in range(200):
+        # SCBs cycle 15 .. 0 repeatedly; the final 8 scanlines continue the
+        # descending order (15 .. 8).
+        screen.line_palette[y] = 15 - (y % 16)
+        output_rgb[y, :, :] = (
+                palettes_linear_rgb[y][output_4bit[y, :]] * 255
+        ).astype(np.uint8)
+
+    # The hardware palette slots hold the palettes for the first 16
+    # scanlines, so the top of the screen displays correctly before the
+    # palette rewriting catches up.
+    for y in range(16):
+        screen.set_palette(15 - y, palettes_rgb12_iigs[y, :, :])
+
+    output_srgb = (image_py.linear_to_srgb(output_rgb)).astype(np.uint8)
+    out_image = image_py.resize(
+        Image.fromarray(output_srgb), screen.X_RES * 2, screen.Y_RES * 2,
+        srgb_output=True)
+
+    if args.show_output and canvas is not None:
+        surface = pygame.surfarray.make_surface(
+            np.asarray(out_image).transpose((1, 0, 2)))
+        canvas.blit(surface, (0, 0))
+        pygame.display.set_caption("][-Pix image preview")
+        pygame.event.pump()
+        pygame.display.flip()
+
+    unique_colours = np.unique(
+        palettes_rgb12_iigs.reshape(-1, 3), axis=0).shape[0]
+    if args.verbose:
+        print("%d unique colours" % unique_colours)
+
+    output_base, _ = os.path.splitext(args.output)
+    if args.save_preview:
+        out_image.save("%s-preview.png" % output_base, "PNG")
+
+    screen.pack()
+    with open(args.output, "wb") as f:
+        f.write(bytes(screen.memory))
+
+    palette_dump = np.zeros(200 * 32, dtype=np.uint8)
+    for y in range(200):
+        for c in range(16):
+            r, g, b = palettes_rgb12_iigs[y, c]
+            palette_dump[32 * y + 2 * c] = (g << 4) | b
+            palette_dump[32 * y + 2 * c + 1] = r
+    palettes_file = "%s.palettes" % output_base
+    with open(palettes_file, "wb") as f:
+        f.write(bytes(palette_dump))
+    if args.verbose:
+        print("Wrote 200 palettes to %s" % palettes_file)
+
+
+def convert_3200(screen, image: Image, args):
+    """Convert image using an independent 16-colour palette per scanline.
+
+    The scanline control bytes number the palettes from 15 down to 0
+    repeatedly down the screen, for display code that rewrites the 16
+    hardware palettes on the fly from SCB interrupts, giving 200 16-colour
+    palettes -- one for each scanline.
+    """
+    rgb = np.array(image).astype(np.float32) / 255
+
+    base_dir = os.path.dirname(__file__)
+    rgb24_to_cam16ucs = np.load(
+        os.path.join(base_dir, "data/rgb24_to_cam16ucs.npy"))
+    rgb12_iigs_to_cam16ucs = np.load(
+        os.path.join(base_dir, "data/rgb12_iigs_to_cam16ucs.npy"))
+
+    reserve_colours = getattr(args, 'reserve_colours', 0)
+    colours_per_palette = 16 - reserve_colours
+    dither = getattr(args, 'dither', 'floyd-steinberg')
+
+    if args.show_output:
+        pygame.init()
+        canvas = pygame.display.set_mode((640, 400))
+        canvas.fill((0, 0, 0))
+        pygame.display.set_caption("][-Pix image preview")
+        pygame.event.pump()
+        pygame.display.flip()
+    else:
+        canvas = None
+
+    # Pre-dither to the full 12-bit palette
+    with colour.utilities.suppress_warnings(python_warnings=True):
+        full_palette_linear_rgb = colour.convert(
+            rgb12_iigs_to_cam16ucs, "CAM16UCS", "RGB").astype(np.float32)
+    _, image_rgb = dither_shr_pyx.dither_shr_perfect(
+        rgb, rgb12_iigs_to_cam16ucs, full_palette_linear_rgb,
+        rgb24_to_cam16ucs, dither)
+
+    with colour.utilities.suppress_warnings(colour_usage_warnings=True):
+        colours_cam = colour.convert(
+            image_rgb, "RGB", "CAM16UCS").astype(np.float32)
+
+    # Fit an independent palette for each scanline
+    palettes_rgb12_iigs = np.zeros((200, 16, 3), dtype=np.uint8)
+    for y in range(200):
+        line_cam = np.ascontiguousarray(colours_cam[y].reshape(-1, 3))
+        palettes_rgb12_iigs[y, :colours_per_palette, :] = _fit_line_palette(
+            line_cam, colours_per_palette, rgb12_iigs_to_cam16ucs)
+        if args.verbose and (y + 1) % 50 == 0:
+            print("Fitted palettes for %d/200 scanlines" % (y + 1))
+
+    # Build CAM16UCS and linear-RGB versions of all 200 palettes
+    palettes_cam = np.zeros((200, 16, 3), dtype=np.float32)
+    for y in range(200):
+        for c in range(16):
+            palettes_cam[y, c, :] = np.array(
+                dither_shr_pyx.convert_rgb12_iigs_to_cam(
+                    rgb12_iigs_to_cam16ucs, palettes_rgb12_iigs[y, c]),
+                dtype=np.float32)
+
+    with colour.utilities.suppress_warnings(python_warnings=True):
+        palettes_linear_rgb = colour.convert(
+            palettes_cam, "CAM16UCS", "RGB").astype(np.float32)
+
+    # Dither with each line locked to its own palette
+    fixed_line_to_palette = np.arange(200, dtype=np.int32)
+    output_4bit, _, total_image_error, _ = \
+        dither_shr_pyx.dither_shr(
+            image_rgb, palettes_cam, palettes_linear_rgb,
+            rgb24_to_cam16ucs, colours_per_palette, dither,
+            fixed_line_to_palette=fixed_line_to_palette)
+
+    _output_image_3200(screen, output_4bit, palettes_rgb12_iigs,
+                       palettes_linear_rgb, args, canvas=canvas)
+
+    if args.show_final_score:
+        print("FINAL_SCORE:", total_image_error)
+
+
 def convert(screen, image: Image, args):
+    if getattr(args, 'shr_3200', False):
+        return convert_3200(screen, image, args)
+
     if getattr(args, 'one_palette', False):
         return convert_one_palette(screen, image, args)
 

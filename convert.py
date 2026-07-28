@@ -171,6 +171,17 @@ def main():
              'Instead, place it at the top-left and fill the remaining area '
              'with black. (default: False)'
     )
+    shr_parser.add_argument(
+        '--3200', dest='shr_3200', action='store_true', default=False,
+        help='Convert to a 3200-colour image, i.e. an independent 16-colour '
+             'palette for each of the 200 scanlines.  Scanline control bytes '
+             'number the palettes from 15 down to 0 repeatedly (the final 8 '
+             'scanlines continue the descending order), for display code '
+             'that rewrites the 16 hardware palettes on the fly from SCB '
+             'interrupts.  The output .SHR file contains the palettes for '
+             'the first 16 scanlines; all 200 palettes are also written to '
+             '<output>.palettes. (default: False)'
+    )
     shr_parser.set_defaults(func=convert_shr)
     args = parser.parse_args()
     args.func(args)
